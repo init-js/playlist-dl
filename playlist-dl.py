@@ -244,7 +244,7 @@ def do_dl_media(pl):
 def main():
     for pl in PLAYLISTS:
         do_dl_listing(pl)
-        #do_dl_media(pl)
+        do_dl_media(pl)
         do_track_meta(pl)
 
 if __name__ == "__main__":
