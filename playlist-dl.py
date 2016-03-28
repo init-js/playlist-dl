@@ -3,23 +3,30 @@
 
 """Actions:
 
-  For each playlist,
+  For each playlist (listed in PLAYLISTS below),
 
-  1 - Download the playlist entries from a playlist url.
+  1 - Download the playlist entries from the youtube url.
 
-  2 - Download the files from that playlist in m4a format.
-      Filenames will have the youtube id as a suffix.
+  2 - Download the files from that playlist in m4a format.  Filenames
+      will have the youtube id as a suffix. Files are downloaded to a
+      subfolder named after the playlist, under DEFAULT_ROOT.
 
   3 - Update m4a attributes to match artist, title, track number,
-      genre.
+      genre, and album. Album name is set to the name of the playlist
+      in the PLAYLISTS configuration. The genre is specified in the
+      PLAYLISTS configuration.
 
   Note:
 
-    Track numbers are obtained from a song's first occurrence in a
-    playlist, if there are multiple occurrences.
+    Track numbers are obtained only from a song's first occurrence in
+    a playlist (if there are multiple occurrences).
 
     Running the script again on the same playlist will reannotate
-    the track numbers.
+    the track numbers, other fields are left unchanged.
+
+    The full track listing is copied to a file called listing.NNN.txt
+    in the playlist folder.
+
 """
 
 import sys
@@ -138,6 +145,13 @@ def update_m4a_meta(pl, meta, m4a):
     #'\xc2\xa9nam' title
     #'\xc2\xa9ART' artist
     #'\xc2\xa9gen' genre
+    #'\xc2\xa9alb' album
+
+    if not '\xc2\xa9gen' in current_atoms and pl.genre is not None:
+        update_command += ["--genre", pl.genre]
+    if '\xc2\xa9alb' not in current_atoms and pl.name is not None:
+        update_command += ["--album", pl.name]
+
     if '\xc2\xa9nam' not in current_atoms and song is not None:
         update_command += ["--title", song]
     if '\xc2\xa9ART' not in current_atoms and artist is not None:
@@ -146,9 +160,6 @@ def update_m4a_meta(pl, meta, m4a):
     # we can update the track number if it changes
     if trackno !=  current_atoms.get("trkn", ""):
         update_command += ["--tracknum", str(trackno)]
-
-    if not '\xc2\xa9gen' in current_atoms and pl.genre is not None:
-        update_command += ["--genre", pl.genre]
 
     if update_command:
         # one or more attributes needs changing
