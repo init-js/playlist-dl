@@ -3,18 +3,39 @@
 
 """Actions:
 
-  For each playlist (listed in PLAYLISTS below),
+  For each playlist in PLAYLISTS,
 
   1 - Download the playlist entries from the youtube url.
 
   2 - Download the files from that playlist in m4a format.  Filenames
       will have the youtube id as a suffix. Files are downloaded to a
-      subfolder named after the playlist, under DEFAULT_ROOT.
+      subfolder named after the playlist, under the root dir for that
+      playlist.
 
   3 - Update m4a attributes to match artist, title, track number,
       genre, and album. Album name is set to the name of the playlist
       in the PLAYLISTS configuration. The genre is specified in the
       PLAYLISTS configuration.
+
+  PLAYLISTS:
+
+  The script is configured with an INI file (syntax modified to allow
+  duplicate section names).  Global settings can be configured in a
+  global [main] section, and each playlist has its own [playlist]
+  section. Command line arguments take precedence over config
+  arguments.
+
+     [main]
+     root = default/root/dir
+
+     [playlist]
+     name = name of the folder
+     genre = genre string
+     url = youtube url of the playlist
+
+     [playlist]
+     ...
+     root = /root/directory/just/for/this/playlist
 
   Note:
 
@@ -38,14 +59,32 @@ import glob
 import json
 import tempfile
 import shutil
+import collections
+import ConfigParser
+
+VERSION = "0.1"
+
+class Multikey(collections.OrderedDict):
+    _unique = 0
+    def __setitem__(self, key, val):
+        if isinstance(val, dict):
+            # this doesn't get called if the section name is already
+            # present in the dict
+            trykey = "_" + key
+            while trykey in self:
+                self._unique += 1
+                trykey = "_" + str(key) + str(self._unique)
+            key = trykey
+        collections.OrderedDict.__setitem__(self, key, val)
 
 class Playlist(object):
-    __slots__ = ["name", "genre", "url", "entries"]
+    __slots__ = ["entries", "name", "genre", "root", "url"]
 
-    def __init__(self, name, genre, url):
+    def __init__(self, name=None, genre=None, url=None, root=None, **kwargs):
         self.name = name
         self.genre = genre
         self.url = url
+        self.root = root
         self.entries = {}
 
     def __len__(self):
@@ -65,13 +104,7 @@ class Playlist(object):
             entry["pos"] = i + 1
             self.entries[entry["id"]] = entry
 
-DEFAULT_ROOT = "/MIRROR/mp3/youtube/"
-
-PLAYLISTS = (
-    Playlist("House Deep and Shallow",
-             "Deep House",
-             "https://www.youtube.com/playlist?list=PLE6Dqzv8ViTSB3Bb2yO2bSUsLnKYJWQ-H"),
-)
+DEFAULT_ROOT = "."
 
 DL_ARGS = [
     "youtube-dl",
@@ -118,7 +151,7 @@ def m4a_atoms(fname):
         # but they are set with "X/Y" syntax
         nums = trackno.split(" of ", 1)
         if len(nums) > 1:
-            a_dict["trkn"] = "%s/%s" % nums
+            a_dict["trkn"] = "%s/%s" % (nums[0], nums[1])
 
     return a_dict
 
@@ -128,7 +161,7 @@ def split_artist(s):
     if len(try_split) > 1:
         return [x.strip() for x in try_split]
     try_split = s.split("-", 1)
-    if len(try_split):
+    if len(try_split) > 1:
         return [x.strip() for x in try_split]
 
     print >> sys.stderr, "Warning: could not split name %s." % (s,)
@@ -165,9 +198,13 @@ def update_m4a_meta(pl, meta, m4a):
         # one or more attributes needs changing
         fd, temp_name = tempfile.mkstemp(suffix="playlist-dl")
         os.close(fd)
+
         cmd = ["AtomicParsley", m4a,
                "--output", temp_name
            ] + update_command
+
+        print >> sys.stdout, "Updating %s: %s ..." % (m4a, cmd)
+
         popen = subprocess.Popen(cmd,
                                  stdout=sys.stdout, stderr=sys.stderr)
         popen.communicate()
@@ -176,7 +213,7 @@ def update_m4a_meta(pl, meta, m4a):
             raise Exception("AtomicParsley failed")
         shutil.move(temp_name, m4a)
 
-        print >> sys.stdout, "Attributes for %s updated: %s" % (m4a, update_command)
+        print >> sys.stdout, "Updated Attributes: %s" % (" ".join(update_command),)
     else:
         print >> sys.stdout, "Attributes for %s already present. Skipping." % (m4a,)
 
@@ -184,12 +221,16 @@ def update_m4a_meta(pl, meta, m4a):
 def do_track_meta(pl):
     """changes the track metadata for every song in the list"""
 
-    dirpath = os.path.join(DEFAULT_ROOT, pl.name)
+    dirpath = os.path.join(pl.root, pl.name)
     ensure_dir(dirpath)
     m4as = glob.glob(os.path.join(dirpath, "*.m4a"))
     for m4a in m4as:
         # assumes ID is at the end of the filename
         toks = re.split("-([-a-zA-Z0-9_]{11})[.]m4a$", m4a)
+        if len(toks) < 3:
+            print >> sys.stderr, "Filename does not contain yid: %s. Skipping." % (m4a,)
+            continue
+
         entry_id = toks[-2]
         entry = pl.get_entry(entry_id)
         if not entry:
@@ -199,7 +240,7 @@ def do_track_meta(pl):
         update_m4a_meta(pl, entry, m4a)
 
 def do_dl_listing(pl):
-    dirpath = os.path.join(DEFAULT_ROOT, pl.name)
+    dirpath = os.path.join(pl.root, pl.name)
     ensure_dir(dirpath)
 
     attempt = 0
@@ -214,7 +255,7 @@ def do_dl_listing(pl):
     fd = -1
     fo = None
     try:
-        print >> sys.stdout, "Writing playlist listing to %s." % (_listing_file(attempt),)
+        print >> sys.stdout, "Writing playlist listing to %s" % (_listing_file(attempt),)
 
         # racey
         fd = os.open(_listing_file(attempt), os.O_RDWR | os.O_CREAT | os.O_EXCL)
@@ -225,7 +266,7 @@ def do_dl_listing(pl):
         popen = subprocess.Popen(cmd,
                                  stdout=subprocess.PIPE, stderr=sys.stderr,
                                  cwd=dirpath)
-        stdout, stderr = popen.communicate()
+        stdout, _ = popen.communicate()
         if popen.returncode != 0:
             print >> sys.stderr, "youtube-dl failed with code:", popen.returncode
             raise Exception("youtube-dl failed")
@@ -240,7 +281,7 @@ def do_dl_listing(pl):
             os.close(fd)
 
 def do_dl_media(pl):
-    dirpath = os.path.join(DEFAULT_ROOT, pl.name)
+    dirpath = os.path.join(pl.root, pl.name)
     ensure_dir(dirpath)
 
     cmd = DL_ARGS + [pl.url]
@@ -253,10 +294,68 @@ def do_dl_media(pl):
         raise Exception("youtube-dl failed")
 
 def main():
-    for pl in PLAYLISTS:
+    import argparse
+    parser = argparse.ArgumentParser(description="Sync music youtube playlist locally."
+                                     "(Version %s)" % VERSION)
+
+    parser.add_argument("configfiles", metavar="CONFIG", nargs=1, help="ini file with playlist sections")
+
+    parser.add_argument("-r", action="store", dest="root",
+                        help="root directory (default current dir)", default=None)
+
+    parser.add_argument('-l', action="store_true", dest="list_config", default=False,
+                        help="list configured playlists")
+
+    opts = parser.parse_args()
+
+    cfg = ConfigParser.ConfigParser(None, Multikey)
+    if not cfg.read(opts.configfiles):
+        print >> sys.stderr, "Cannot read config."
+        return 1
+
+    if opts.root is None and cfg.has_option("main", "root"):
+        opts.root = cfg.get("main", "root")
+
+    if opts.root is None:
+        opts.root = DEFAULT_ROOT
+
+    playlists = []
+
+    for section in [x for x in cfg.sections() if x.startswith("_playlist")]:
+        pl = {'name': None, 'url': None, 'genre': None, 'root': opts.root}
+        for optname, optval in cfg.items(section):
+            pl[optname] = optval
+        plname = pl.get("name", None)
+        if plname is None:
+            print >> sys.stderr, "Playlist is unnamed. Specify a 'name' key for each '[playlist]' section."
+            return 1
+
+        if not plname or '/' in plname or '\x00' in plname:
+            print >> sys.stderr, "Invalid name for playlist: '%s'" % (plname,)
+            return 1
+
+        for mandatory in ('url', 'root', 'genre'):
+            if pl.get(mandatory, None) is None:
+                print >> sys.stderr, "playlist '%s' is missing key '%s" % (plname, mandatory)
+                return 1
+        playlists.append(Playlist(**pl))
+
+    if opts.list_config:
+        count = 0
+        for pl in playlists:
+            if count > 0: print ""
+            print "[" + pl.name + "]"
+            print "genre = %s" % (pl.genre,)
+            print "url = %s" % (pl.url,)
+            count += 1
+        return 0
+
+    for pl in playlists:
         do_dl_listing(pl)
         do_dl_media(pl)
         do_track_meta(pl)
 
+    return 0
+
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
